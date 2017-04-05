@@ -28,7 +28,7 @@ function _mapToObj(map) {
 
 var autoVersion;
 
-module.exports = function(AWS) {
+module.exports = function() {
   return {
     _createDocumentationPart: function _createDocumentationPart(part, def, knownLocation) {
       const location = part.locationProps.reduce((loc, property) => {
@@ -75,12 +75,11 @@ module.exports = function(AWS) {
     },
 
     _updateDocumentation: function _updateDocumentation() {
-      const apiGateway = new AWS.APIGateway(this.serverless.providers.aws.getCredentials());
-      return apiGateway.getDocumentationVersion({
+      const aws = this.serverless.providers.aws;
+      return aws.request('APIGateway', 'getDocumentationVersion', {
         restApiId: this.restApiId,
         documentationVersion: this.getDocumentationVersion(),
-      }).promise()
-        .then(() => {
+      }).then(() => {
           const msg = 'documentation version already exists, skipping upload';
           console.info('-------------------');
           console.info(msg);
@@ -92,26 +91,30 @@ module.exports = function(AWS) {
 
           return Promise.reject(err);
         })
-        .then(() => apiGateway.getDocumentationParts({
-          restApiId: this.restApiId,
-          limit: 9999,
-        }).promise())
-        .then(results => results.items.map(part => apiGateway.deleteDocumentationPart({
-          documentationPartId: part.id,
-          restApiId: this.restApiId,
-        }).promise()))
+        .then(() =>
+          aws.request('APIGateway', 'getDocumentationParts', {
+            restApiId: this.restApiId,
+            limit: 9999,
+          })
+        )
+        .then(results => results.items.map(
+          part => aws.request('APIGateway', 'deleteDocumentationPart', {
+            documentationPartId: part.id,
+            restApiId: this.restApiId,
+          })
+        ))
         .then(promises => Promise.all(promises))
         .then(() => this.documentationParts.reduce((promise, part) => {
           return promise.then(() => {
             part.properties = JSON.stringify(part.properties);
-            return apiGateway.createDocumentationPart(part).promise();
+            return aws.request('APIGateway', 'createDocumentationPart', part);
           });
         }, Promise.resolve()))
-        .then(() => apiGateway.createDocumentationVersion({
+        .then(() => aws.request('APIGateway', 'createDocumentationVersion', {
           restApiId: this.restApiId,
           documentationVersion: this.getDocumentationVersion(),
           stageName: this.options.stage,
-        }).promise());
+        }));
     },
 
     getGlobalDocumentationParts: function getGlobalDocumentationParts() {
@@ -183,16 +186,17 @@ module.exports = function(AWS) {
       return this._updateDocumentation();
     },
 
-    addRequestHeaders: function addRequestHeaders(resource, documentation) {
-      if (documentation.requestHeaders && Object.keys(documentation.requestHeaders).length > 0) {
+    addDocumentationToApiGateway: function addDocumentationToApiGateway(resource, documentationPart, mapPath) {
+      if (documentationPart && Object.keys(documentationPart).length > 0) {
         if (!resource.Properties.RequestParameters) {
           resource.Properties.RequestParameters = {};
         }
-        documentation.requestHeaders.forEach(function(rh){
-          var source = 'method.request.header.'+rh.name;
+
+        documentationPart.forEach(function(qp) {
+          const source = `method.request.${mapPath}.${qp.name}`;
           if (resource.Properties.RequestParameters.hasOwnProperty(source)) return; // don't mess with existing config
-          resource.Properties.RequestParameters[source] = rh.required || false;
-        })
+          resource.Properties.RequestParameters[source] = qp.required || false;
+        });
       }
     },
 
@@ -206,7 +210,16 @@ module.exports = function(AWS) {
         this.addMethodResponses(resource, eventTypes.http.documentation);
         this.addRequestModels(resource, eventTypes.http.documentation);
         if (!this.options['doc-safe-mode']) {
-          this.addRequestHeaders(resource, eventTypes.http.documentation);
+          this.addDocumentationToApiGateway(
+            resource,
+            eventTypes.http.documentation.requestHeaders,
+            'header'
+          );
+          this.addDocumentationToApiGateway(
+            resource,
+            eventTypes.http.documentation.queryParams,
+            'querystring'
+          );
         }
         resource.DependsOn = Array.from(resource.DependsOn);
         if (resource.DependsOn.length === 0) {
